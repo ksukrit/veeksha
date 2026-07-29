@@ -339,3 +339,44 @@ def test_wait_for_ready_does_not_sleep_past_a_rampup_step() -> None:
     scheduler._start_monotonic -= 120.0
     assert scheduler._current_target_concurrency() == 60
     assert scheduler._seconds_until_next_rampup_step() is None
+
+
+@pytest.mark.unit
+def test_rampup_paces_pregenerated_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-generated backlog activates along the ramp, not in one burst.
+
+    Regression: the scheduler is constructed before session pre-generation,
+    which can outlast the entire ramp. reset_reference_time() must re-arm the
+    ramp clock, and activation must then follow that clock via the dispatch
+    polling path (pop_ready/wait_for_ready) even when no schedule/completion
+    events fire.
+    """
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(
+        "veeksha.traffic.concurrent.time.monotonic", lambda: clock["now"]
+    )
+    config = ConcurrentTrafficConfig(
+        target_concurrent_sessions=10, rampup_seconds=10.0
+    )
+    scheduler = ConcurrentTrafficScheduler(config, SeedManager(seed=42))
+
+    # Pre-generation burns more than the whole ramp; a poll during this
+    # window latches the ramp as complete.
+    clock["now"] += 25.0
+    scheduler.pop_ready()
+    scheduler.reset_reference_time()
+
+    # The prefetch worker pushes the entire backlog in one burst at t ~ 0.
+    for session_idx in range(10):
+        scheduler.schedule_session(make_linear_session(session_idx + 1, 1))
+    assert scheduler._active_session_count() == 0
+
+    clock["now"] += 5.0  # mid-ramp
+    scheduler.pop_ready()
+    assert scheduler._active_session_count() == 5
+
+    clock["now"] += 5.0  # ramp complete
+    scheduler.pop_ready()
+    assert scheduler._active_session_count() == 10

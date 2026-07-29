@@ -165,6 +165,7 @@ class ConcurrentTrafficScheduler(BaseTrafficScheduler):
 
     def pop_ready(self) -> Optional[Tuple[Request, int, int]]:
         with self._condition:
+            self._try_activate_pending_locked()
             return self._try_pop_ready_locked()
 
     def _populate_history(
